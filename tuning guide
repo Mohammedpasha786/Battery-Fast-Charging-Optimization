@@ -1,0 +1,93 @@
+## SPM Parameter Tuning
+
+### Key parameters to calibrate (in `configs/battery_params.yaml`)
+
+| Parameter | Effect | How to calibrate |
+|-----------|--------|-----------------|
+| `Ds_pos`, `Ds_neg` | Diffusion speed → V dip during high C-rate | GITT pulse test |
+| `cs_max_pos/neg` | Capacity | From full CC discharge |
+| `stoich_0/100_soc` | SOC–OCV alignment | Slow OCV profile |
+| `R_int` | IR drop | 10ms pulse test |
+| `particle_radius` | Diffusion timescale | EIS or literature |
+
+### Sanity checks after fitting
+
+```matlab
+% 1. Equilibrium voltage check (no current)
+spm = buildSPM(battParams);
+V_eq = spm.ocvPos(battParams.electrodes.positive.stoich_100_soc) - ...
+       spm.ocvNeg(battParams.electrodes.negative.stoich_100_soc);
+fprintf('Expected V at 100%% SOC: %.3f V (should be ~4.2 V)\n', V_eq);
+
+% 2. Capacity check
+Q_sim = simulatedCapacity(spm, battParams);
+fprintf('Simulated capacity: %.3f Ah (expected: %.3f Ah)\n', Q_sim, battParams.cell.nominal_capacity_Ah);
+```
+
+---
+
+## Charging Profile Tuning
+
+### CC–CV
+- **Increase C-rate** → faster but higher temperature, more plating risk
+- **Decrease cutoff current** → higher final SOC but longer CV phase
+
+### Multi-Stage
+- More stages with smaller current steps → smoother, less stress
+- Set `soc_thresholds` based on where theta_neg first exceeds 0.7
+
+### MPC Tuning
+- **`prediction_horizon`** (`Np`): 10–30 is typical; larger = smoother but more compute
+- **`plating_threshold`**: set conservatively (0.80–0.85); too low → slow charge
+- Add I-rate limiting (`dI_max`) to prevent aggressive current steps
+
+### Pseudo-Spectral Optimization
+- **`N_collocation`**: start with 20, increase to 40+ for accuracy
+- If fmincon fails to converge: use a better initial guess (warm-start from multi-stage profile)
+- Tighten `constraint_tol` if voltage violations appear in simulation
+
+---
+
+## Thermal Tuning
+
+| Parameter | Effect | Typical range |
+|-----------|--------|--------------|
+| `R_core_K_W` | Core cooling resistance | 0.5–5 K/W |
+| `R_surface_K_W` | Surface-to-ambient | 1–10 K/W |
+| `C_core_J_K` | Thermal inertia | 30–100 J/K |
+| `dUdT_positive` | Entropic heat magnitude | –0.0001 to –0.001 V/K |
+
+### Temperature too high?
+1. Reduce C-rate in CC stages
+2. Add pre-cooling pause
+3. Lower `R_surface_K_W` (better cooling, e.g. active thermal management)
+
+---
+
+## Degradation Model Tuning
+
+Calibrate `fade_prefactor` and `activation_energy_J_mol` using aging dataset:
+
+```matlab
+% Fit to n_cycle vs Q_retention data from Battery Archive
+loss_data = [50, 0.02; 100, 0.035; 200, 0.065; 500, 0.12];  % [cycle, Q_loss_frac]
+n = loss_data(:,1);
+Q = loss_data(:,2);
+
+% Model: Q_loss = A * n^0.5 (at fixed T)
+A_fit = Q ./ sqrt(n);
+fade_prefactor = mean(A_fit);
+fprintf('Fitted prefactor: %.3e\n', fade_prefactor);
+```
+
+---
+
+## Common Issues & Fixes
+
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| `ode15s` fails / too slow | Stiff system, small timesteps | Increase AbsTol, use `spmJacobian` |
+| Voltage exceeds V_max | Current too high | Reduce I_max, add voltage event |
+| `fmincon` diverges | Poor initial guess | Warm-start from multi-stage profile |
+| theta_neg > 1 | Timestep too large | Reduce dt or add capping event |
+| SOC oscillates | OCV curve non-monotone at boundaries | Clamp theta to [0.01, 0.99] |
