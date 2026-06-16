@@ -1,0 +1,167 @@
+## Overview
+This project implements and compares fast-charging strategies for lithium-ion batteries using the Single Particle Model (SPM) as the governing electrochemical model. The pipeline covers five stages:
+
+1. **SPM setup** — parameterize the electrochemical model for a target cell
+2. **Baseline simulation** — CC–CV reference at standard rates
+3. **Multi-stage CC profiles** — stepped current for faster charging
+4. **Optimal control** — pseudo-spectral and direct collocation methods
+5. **Analysis** — thermal, degradation, plating risk, and metric comparison
+
+---
+
+## Stage 1 — Single Particle Model (SPM)
+
+### Governing Equations
+
+The SPM approximates each electrode as a single spherical particle governed by Fick's Second Law in spherical coordinates:
+
+```
+∂cₛ/∂t = (Dₛ/r²) * ∂/∂r(r² * ∂cₛ/∂r)
+```
+
+**Boundary conditions:**
+```
+∂cₛ/∂r|_{r=0} = 0                    (symmetry at particle center)
+-Dₛ ∂cₛ/∂r|_{r=Rₛ} = jₙ             (surface flux from applied current)
+```
+
+**Interfacial flux:**
+```
+jₙ = I_app / (aₛ F L A)             (mol/m²/s)
+```
+
+**Terminal voltage:**
+```
+V = Uₚ(θₚ) - Uₙ(θₙ) - I · Rₑ
+θₖ = cₛ,surf,ₖ / cₛ,max,ₖ
+```
+
+### Discretization
+
+Fick's Law is discretized using finite differences on a uniform radial grid with Nr nodes. This gives a system of 2×Nr ODEs integrated with MATLAB's `ode15s` stiff solver.
+
+### Lithium Plating Indicator
+
+Instead of computing the solid/liquid phase potential difference at the anode/separator interface (which requires the Doyle-Fuller-Newman model), the SPM uses **anode surface stoichiometry** `θₙ` as a practical substitute:
+
+- `θₙ → 1` implies the anode surface is near lithium saturation
+- Onset of metallic lithium plating is approximated at `θₙ > 0.85`
+- A sigmoid function creates a smooth plating indicator: `Φ_plating = 1 / (1 + exp(-50(θₙ - threshold)))`
+
+---
+
+## Stage 2 — Baseline CC–CV
+
+The CC–CV protocol is the industry standard:
+
+| Phase | Control | Duration |
+|-------|---------|----------|
+| CC | Constant current I = C_rate × Q | Until V = V_max |
+| CV | Hold V = V_max | Until I < I_cutoff (e.g. C/20) |
+
+Reference C-rates: 0.5C (slow/safe), 1C (standard), 2C (fast).
+
+---
+
+## Stage 3 — Multi-Stage CC Profiles
+
+Multi-stage protocols apply decreasing C-rates as SOC increases:
+
+```
+Stage 1: I₁ = 3C   (SOC 10→50%)
+Stage 2: I₂ = 2C   (SOC 50→70%)
+Stage 3: I₃ = 1C   (SOC 70→85%)
+Stage 4: I₄ = 0.5C (SOC 85→99%)
+Final:   CV taper
+```
+
+The rationale: high current is safe at low SOC (anode has abundant intercalation sites), but must be reduced as SOC increases to avoid plating.
+
+---
+
+## Stage 4 — Optimal Control Formulation
+
+### Problem Statement
+
+```
+Minimize:   t_f                        (minimum charging time)
+Subject to:
+  ẋ = f(x, I)                          (SPM dynamics)
+  V(t) ≤ V_max                         (voltage safety)
+  θₙ(t) ≤ θ_plating                   (plating constraint)
+  T(t) ≤ T_max                         (thermal safety, if coupled)
+  0 ≤ I(t) ≤ I_max                     (current bounds)
+  SOC(t_f) ≥ SOC_target               (terminal constraint)
+  x(0) = x₀                           (initial condition)
+```
+
+### Pseudo-Spectral Method (Gauss–Lobatto)
+
+State and control are approximated by Lagrange polynomials on Gauss–Lobatto collocation nodes `{τ₁, ..., τₙ}` on [-1,1]:
+
+```
+x(τ) ≈ Σ x(τₖ) Lₖ(τ)
+dx/dτ = D × x             (differentiation matrix)
+```
+
+Dynamics constraint (collocation): `(2/t_f) D x = f(x, I)` at each node.
+
+This converts the infinite-dimensional OCP into a finite NLP solved with `fmincon` (interior-point algorithm).
+
+### MPC (Model Predictive Control)
+
+At each timestep k, solve a short-horizon subproblem:
+```
+Minimize:   -Σ I(k+j) × dt              (maximize charge throughput)
+Subject to: V(k+j|k) ≤ V_max
+            θₙ(k+j|k) ≤ θ_plating
+            0 ≤ I(k+j) ≤ I_max
+```
+Apply I*(k), receive new state, repeat.
+
+---
+
+## Stage 5 — Thermal Model
+
+### Two-State Lumped Thermal Model
+
+```
+C_core  dT_core/dt    = Q_gen - (T_core - T_surf) / R_c
+C_surf  dT_surf/dt    = (T_core - T_surf)/R_c - (T_surf - T_amb)/R_u
+```
+
+### Heat Generation
+
+```
+Q_total = Q_ohmic + Q_entropic
+Q_ohmic    = I² R(T)                         [irreversible]
+Q_entropic = I T dU/dT                        [reversible]
+R(T) = R_ref exp(Ea/R (1/T - 1/T_ref))       [Arrhenius]
+```
+
+---
+
+## Stage 6 — Degradation
+
+### SEI Growth (square-root law)
+
+```
+δ_SEI(t) = √(k_SEI × t × exp(-Ea/RT))
+Q_loss_SEI = F aₛ δ_SEI c_SEI L A / 3600     [Ah]
+```
+
+### Empirical Capacity Fade
+
+```
+Q_loss(n) = A exp(-Ea/RT) × (I_rms/I_ref)^z × n^0.5
+```
+
+---
+
+## References
+
+1. Perez et al. (2017). Optimal Charging via SPM with Electrolyte and Thermal Dynamics. *J. Electrochem. Soc.*
+2. Chen et al. (2020). Optimal Fast-Charging via Electrochemical–Thermal Model. *Energies*, 13, 2388.
+3. Ecker et al. (2015). Parameterization of a physico-chemical model of a lithium-ion battery. *J. Electrochem. Soc.*
+4. Lin et al. (2013). A lumped-parameter electro-thermal model for cylindrical batteries. *J. Power Sources*, 257.
+5. Bernardi et al. (1985). A general energy balance for battery systems. *J. Electrochem. Soc.*, 132(1).
