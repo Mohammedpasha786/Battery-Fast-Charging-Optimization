@@ -1,0 +1,101 @@
+# Datasets & Data Sources
+
+## Supported Datasets
+
+### 1. Battery Archive (NREL)
+**URL:** https://batteryarchive.org/  
+**Contents:** Cycle aging data for 18650 cells (LFP, NMC), constant-current and pulse tests  
+**Use in this project:** SOH validation, capacity fade calibration
+
+**Download steps:**
+1. Register at https://batteryarchive.org/
+2. Select cell chemistry (NMC recommended for this project)
+3. Download CSV cycle data files
+4. Place in `data/raw/battery_archive/`
+
+### 2. Volta Foundation Data Repository
+**URL:** https://data.voltafoundation.org/  
+**Contents:** Multi-format battery characterization data  
+**Use in this project:** OCV–SOC curve fitting, EIS data for parameter estimation
+
+### 3. CALCE Battery Research Group
+**URL:** https://calce.umd.edu/battery-data  
+**Contents:** Capacity fade for INR18650-MH1 cells at various temperatures and C-rates
+
+### 4. Stanford Battery Dataset (SNL)
+**URL:** https://data.matr.io/1/  
+**Contents:** 124 LFP/graphite cells, various fast-charging protocols  
+**Use in this project:** Fast-charging protocol comparison, cycle life prediction
+
+### 5. Oxford Battery Degradation Dataset
+**URL:** https://ora.ox.ac.uk/objects/uuid:03ba4b01-cfed-46d3-9b1a-7d4a7bdf6fac  
+**Contents:** 8 LCO 18650 cells, 50mHz–20kHz EIS at various SOCs
+
+---
+
+## Data Format
+
+All datasets should be preprocessed to `data/processed/` as `.mat` files with this structure:
+
+```matlab
+data.time           % [N x 1] seconds
+data.voltage        % [N x 1] volts
+data.current        % [N x 1] amps (positive = charge)
+data.temperature    % [N x 1] celsius (or kelvin)
+data.soc            % [N x 1] fraction [0,1]  (if available)
+data.cycle          % scalar cycle number (for aging studies)
+data.cell_id        % string identifier
+data.chemistry      % 'NMC', 'LFP', 'LCO', etc.
+```
+
+---
+
+## Parameter Fitting from Data
+
+Use `data/` files to fit SPM parameters:
+
+### 1. Capacity from CC discharge
+```matlab
+Q = trapz(t, abs(I)) / 3600;   % Ah
+```
+
+### 2. OCV–SOC from slow discharge (C/20)
+```matlab
+% Discharge at C/20 → voltage profile ≈ OCV
+OCV_curve = [soc_vector, voltage_vector];
+```
+
+### 3. Internal resistance from pulse test
+```matlab
+% ΔV at step current onset / ΔI
+R_int = (V_before_pulse - V_immediately_after) / delta_I;
+```
+
+### 4. Diffusion coefficient from GITT
+```matlab
+% Galvanostatic Intermittent Titration Technique
+Ds = 4/pi * (I_pulse * Vm / (z_A * F * A))^2 * (dE_dSOC / dE_dsqrt_t)^2;
+```
+
+---
+
+## Validation
+
+After fitting, validate SPM predictions against dataset:
+
+```matlab
+% Run SPM with fitted parameters
+out = runSPM(spm, profile_from_data, battParams, false, []);
+
+% Compare voltage
+figure;
+plot(data.time/60, data.voltage, 'k-', 'LineWidth', 2, 'DisplayName', 'Experiment');
+hold on;
+plot(out.time/60, out.voltage, 'r--', 'LineWidth', 1.5, 'DisplayName', 'SPM');
+xlabel('Time (min)'); ylabel('Voltage (V)');
+legend; title('Voltage Validation');
+
+% RMSE
+rmse_V = sqrt(mean((interp1(data.time, data.voltage, out.time) - out.voltage).^2));
+fprintf('Voltage RMSE: %.4f V\n', rmse_V);
+```
