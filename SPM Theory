@@ -1,0 +1,105 @@
+## Why the SPM?
+
+The full Doyle–Fuller–Newman (DFN) model resolves spatial variation through both electrode solid and electrolyte phases — resulting in a large coupled PDE system expensive to simulate in real time. The **Single Particle Model** simplifies this by representing each electrode as a single representative spherical particle, retaining the solid-phase diffusion physics while neglecting electrolyte concentration gradients (valid for moderate C-rates ≤ 3–4C).
+
+---
+
+## Model Equations
+
+### 1. Solid-Phase Diffusion (Fick's 2nd Law, Spherical)
+
+```
+∂cₛ,ₖ/∂t = (Dₛ,ₖ/r²) ∂/∂r(r² ∂cₛ,ₖ/∂r)    k ∈ {pos, neg}
+```
+
+**Boundary conditions:**
+```
+∂cₛ,ₖ/∂r|_{r=0} = 0                              (symmetry)
+∂cₛ,ₖ/∂r|_{r=Rₛ,ₖ} = -jₙ,ₖ / Dₛ,ₖ             (flux BC)
+```
+
+**Interfacial flux (Butler–Volmer simplified for SPM):**
+```
+jₙ,ₖ = I_app / (aₛ,ₖ F Lₖ A)
+```
+
+| Symbol | Meaning | Typical Value |
+|--------|---------|--------------|
+| cₛ,ₖ | Solid-phase Li⁺ concentration | mol/m³ |
+| Dₛ,ₖ | Solid diffusion coefficient | ~1–40 × 10⁻¹⁴ m²/s |
+| Rₛ,ₖ | Particle radius | 5–15 µm |
+| aₛ,ₖ | Specific interfacial area | ~10⁶ m²/m³ |
+| Lₖ | Electrode thickness | 50–100 µm |
+
+### 2. Stoichiometry (Normalized Surface Concentration)
+
+```
+θₖ = cₛ,surf,ₖ / cₛ,max,ₖ     ∈ [0, 1]
+```
+
+- `θ → 0`: electrode is nearly empty of lithium
+- `θ → 1`: electrode is nearly full (lithium saturation)
+
+### 3. Open Circuit Voltage (OCV)
+
+OCV curves `Uₖ(θ)` are experimentally measured or fitted to Redlich–Kister polynomials:
+
+```
+V_OCV = Uₚ(θₚ) - Uₙ(θₙ)
+```
+
+This project uses polynomial fits for NMC (cathode) and graphite (anode).
+
+### 4. Terminal Voltage
+
+```
+V = Uₚ(θₚ) - Uₙ(θₙ) - I · Rₑ
+```
+
+`Rₑ` is the lumped internal resistance capturing ohmic drop in electrolyte, current collectors, and SEI layers.
+
+### 5. State of Charge
+
+SOC is estimated from the volume-averaged negative-electrode concentration:
+
+```
+SOC = (θₙ,surf - θₙ,0%) / (θₙ,100% - θₙ,0%)
+```
+
+---
+
+## Validity Range
+
+| Condition | SPM valid? | Notes |
+|-----------|-----------|-------|
+| C-rate ≤ 2C | ✅ Yes | Electrolyte gradients negligible |
+| C-rate 2–4C | ⚠ Approximate | Increasing error |
+| C-rate > 4C | ❌ No | Use DFN model |
+| T ∈ [15–45°C] | ✅ Yes | Nominal temperature range |
+| Near end of charge (SOC > 95%) | ⚠ Careful | Surface gradient large |
+
+---
+
+## Discretization
+
+The SPM ODEs are solved numerically using uniform finite differences on `Nr` radial nodes:
+
+- `Nr = 10` is sufficient for most simulations (< 1% error vs Nr=50)
+- `Nr = 20` recommended for optimization (more accurate Jacobians)
+- MATLAB `ode15s` (stiff solver) handles the resulting stiff ODE system
+
+---
+
+## Lithium Plating (Simplified Indicator)
+
+A rigorous plating criterion requires comparing electrostatic potentials:
+```
+φₛ - φₗ|_{x=0, anode/separator} < 0   → lithium plating favorable
+```
+
+Since SPM neglects `φₗ`, we use the surrogate:
+```
+θₙ,surf > θ_plating (≈ 0.85)  →  plating risk warning
+```
+
+This is the approach recommended in the project description for SPM-based plating risk assessment.
